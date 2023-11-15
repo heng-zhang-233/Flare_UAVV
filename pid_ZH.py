@@ -8,7 +8,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 port = 25556
 control_interval = 0.002 # 控制频率，500Hz
-duration = 1       # 运行时间
+duration = 4      # 运行时间
 iterations = 1      # 后续可能的ILC会用到，迭代次数
 control_min = 0.0   # min和max分别代表这PWM的占空比
 control_max = 1.0
@@ -32,24 +32,28 @@ for name in control_names:
 # define mapping from observation to targets (pid input)
 def get_targets(state : tuple) -> tuple:
     force_up = state[2]
-    torque_roll = state[3]
-    torque_pitch = state[4]
-    torque_yaw = state[5]
+    torque_roll = state[7]
+    torque_pitch = state[6]
+    torque_yaw = state[8]
     return (force_up, torque_roll, torque_pitch, torque_yaw)
 
+
 # setup mapping between targets and controls
-controls_to_targets = np.array(((1, 1, 1, 1), (1, -1, 1, -1), (0.9, 0.9, -1.1, -1.1), (1, -1, -1, 1))) #pitch is not balanced due to propeller position difference between front and back
+front_len = 1
+behind_len = 1
+controls_to_targets = np.array(((1, 1, behind_len, behind_len), (1, -1, behind_len, -1 * behind_len), (1, 1, -1 * behind_len, -1 * behind_len), (1, -1, -1 * behind_len, behind_len))) #pitch is not balanced due to propeller position difference between front and back
 targets_to_control = np.linalg.inv(controls_to_targets)
+# print(f"target_2_control: {targets_to_control}")
 
 # setup pid controller for targets
-pid_tunes = ((0.5, 0.5, 0.0), (0.01, 0.01, 0.0), (0.01, 0.01, 0.0), (0.01, 0.01, 0.0))  # Kp, Ki, Kd
+pid_tunes = 1 * ((1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0))  # Kp, Ki, Kd
 pids = []
 for tune in pid_tunes:
     pid = PID(tune[0], tune[1], tune[2], setpoint=0.0, sample_time=None)
     pids.append(pid)
 
 pids[0].setpoint = 1  # 将第一个PID闭环系统的desired值设为0.5
-#pids[2].setpoint = 4.5992468
+pids[2].setpoint = 4.5992468 / 180 * np.pi
 
 # get time step
 time_step = controller.get_time_step()
@@ -62,10 +66,13 @@ for i in range(iterations):
     x = [] # 存储时间序列
     y = [] # 存储一个四维的状态（y, roll, pitch, yaw）
     thrust = []
+    state = []
     for i in range(len(pid_tunes)):
         y.append([])
     for i in range(len(control_names)):
-        thrust.append([]) # 存储发送到每个旋翼的PWM值
+        thrust.append([]) # 存储发送到每个旋翼的PWM值，以便画图
+    for i in range(0, 12):
+        state.append([])  # 用来存储状态信息以便画图
 
     #controller.reset()
     t = 0.0
@@ -79,30 +86,49 @@ for i in range(iterations):
         x.append(t) # 存储当前的时间序列
         print(f'position: ({reply[0]:.5f}, {reply[1]:.5f}, {reply[2]:.5f}), velocity: ({reply[3]:.5f}, {reply[4]:.5f}, {reply[5]:.5f}), rotation: ({reply[6]:.5f}, {reply[7]:.5f}, {reply[8]:.5f}), angular velocity: ({reply[9]:.5f}, {reply[10]:.5f}, {reply[11]:.5f})')  # position: x, y, z;  rotation: roll, pitch, yaw
 
+        for i in range(0, 12):
+            state[i].append(reply[i])
+
         target_input = get_targets(reply)
         target_output = np.zeros(len(target_input)) # 返回一个和target_input同维度的全零数组
         for i in range(len(target_input)):
             y[i].append(target_input[i]) 
             #if i == 2: continue # currently ignore yaw
-            target_output[i] = pids[i](target_input[i], dt) # 通过PID控制器计算得到应该有的力和力矩
+            # target_output[i] = pids[i](target_input[i], dt) # 通过PID控制器计算得到应该有的力和力矩
+        target_output[0] = -5 * (reply[2] - 1) - 0.5 * (reply[5] - 0)
+        target_output[1] = -5 * (reply[7] - 0) - 0.5 * (reply[10] - 0)
+        target_output[2] = -5 * (reply[6] - 0) - 0.5 * (reply[9] - 0)
+        target_output[3] = -5 * (reply[8] - 0) - 0.5 * (reply[11] - 0)
         # print(f"At time {x}, y is {y}")
 
-        new_controls = np.matmul(targets_to_control, target_output) # 通过mapping matrix的逆，计算每个电机的PWM输入
+        # new_controls = np.matmul(targets_to_control, target_output) / 1.0 # 通过mapping matrix的逆，计算每个电机的PWM输入
+        new_controls = np.dot(targets_to_control, target_output) / 1.0
         #new_controls = np.ones(len(control_hashes)) * control_target
-        print(f"Control_input is: {new_controls}.")
+        print(f"Control_input is: {target_output} -> {new_controls}.")
         for i in range(len(control_indices)):  # 将计算得到的PWM通过饱和模块
             hash = control_indices[i]
             next = max(control_min, min(new_controls[i], control_max))
-            # if t < 0.5:
-            #     next = 0.0
+            if t < 0:
+                if i == 0:
+                    next = 1.0
+                elif i == 1:
+                    next = 1.0
+                elif i == 2:
+                    next = 0.6
+                elif i == 3:
+                    next = 0.6
+
             controls[control_indices[i]] = next  # 更新 controls 的值，是返回Simulator的值
             thrust[i].append(next)   # 记录，新增当前的PWM输入，以便画图
+
+        print(f"Now is {t}, Control_PWM is: {controls}.")
 
     fig, axes = plt.subplots(2, 2)
 
     ax1 = axes[0, 0]
     ax2 = axes[0, 1]
     ax3 = axes[1, 0]
+    ax4 = axes[1, 1]
 
     color1 = 'tab:red'
     ax1.set_xlabel('time(s)')
@@ -112,7 +138,7 @@ for i in range(iterations):
     ax1.plot(x, thrust[2], label='back left')
     ax1.plot(x, thrust[3], label='back right')
     ax1.tick_params(axis='y', labelcolor=color1) # 将 y轴刻度 的颜色设置为color1.
-    ax1.set_ylim(-3000, 3000)
+    ax1.set_ylim(-0.25, 1.25)
     ax1.legend()
     ax1.set_title('Propeller RPM vs. Time')
 
@@ -123,7 +149,7 @@ for i in range(iterations):
     ax2.set_ylabel('velocity(m/s)', color=color2)
     ax2.plot(x, y[0], label='vertical velocity', color=color2)
     ax2.tick_params(axis='y', labelcolor=color2)
-    ax2.set_ylim(-0.25, 1.5)
+    ax2.set_ylim(-0.25, 2.5)
     ax2.legend()
     ax2.set_title('vertical velocity vs. Time')
 
@@ -153,6 +179,19 @@ for i in range(iterations):
     ax3.set_ylim(-30, 30)
     ax3.legend()
     ax3.set_title('Attitude vs. Time')
+
+    color2 = 'tab:olive'
+    color3 = 'tab:cyan'
+    color4 = 'tab:gray'
+    ax4.set_xlabel('time(s)')
+    ax4.set_ylabel('position(m)', color=color2)
+    ax4.plot(x, state[0], label='position x', color=color2)
+    ax4.plot(x, state[1], label='position y', color=color3)
+    ax4.plot(x, state[2], label='position z', color=color4)
+    ax4.tick_params(axis='y', labelcolor=color2)
+    ax4.set_ylim(-2, 5)
+    ax4.legend()
+    ax4.set_title('Position vs. Time')
 
     fig.tight_layout()
     fig.set_size_inches(15.0, 5.0)

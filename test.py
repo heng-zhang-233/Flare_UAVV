@@ -5,7 +5,11 @@ import matplotlib.pyplot as plt
 
 port = 25556
 control_interval = 0.002
+<<<<<<< HEAD
 duration = 2
+=======
+duration = 10
+>>>>>>> 43ed930 (Flare_UAV_Control)
 iterations = 1
 control_min = 0.0
 control_max = 1.0
