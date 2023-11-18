@@ -15,6 +15,11 @@ iterations = 1      # 后续可能的ILC会用到，迭代次数
 control_min = 0.0   # min和max分别代表这PWM的占空比
 control_max = 1.0
 
+
+# 定义无人机的物理参数
+pa.m = 1
+
+
 controller = simcontrol.Controller("localhost", port) # 从仿真器那里获取控制器接口，输入和输出
 
 # setup controls
@@ -22,7 +27,7 @@ control_names = ['fl', 'fr', "bl", "br"] # 分别代表着前左、前右、后�
 control_indices = []
 controls = {}
 # 从仿真器那里获取上面四个名字所对应的index，然后把index放在control_indices，每个index需要返回的PWM值放在controls中。
-for name in control_names:  
+for name in control_names:
     idx = controller.get_control_index(name)
     if idx is None:
         print(f'Control not found: {name}')

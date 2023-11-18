@@ -2,15 +2,13 @@ import simcontrol
 from simple_pid import PID
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 port = 25556
 control_interval = 0.002 # 控制频率，500Hz
-duration = 10      # 运行时间
+duration = 4      # 运行时间
 iterations = 1      # 后续可能的ILC会用到，迭代次数
 control_min = 0.0   # min和max分别代表这PWM的占空比
 control_max = 1.0
@@ -43,34 +41,19 @@ def get_targets(state : tuple) -> tuple:
 # setup mapping between targets and controls
 front_len = 1
 behind_len = 1
-controls_to_targets = np.array(((front_len, front_len, behind_len, behind_len), (front_len, -1 * front_len, behind_len, -1 * behind_len), (front_len, front_len, -1 * behind_len, -1 * behind_len), (front_len, -1 * front_len, -1 * behind_len, behind_len))) #pitch is not balanced due to propeller position difference between front and back
+controls_to_targets = np.array(((1, 1, behind_len, behind_len), (1, -1, behind_len, -1 * behind_len), (1, 1, -1 * behind_len, -1 * behind_len), (1, -1, -1 * behind_len, behind_len))) #pitch is not balanced due to propeller position difference between front and back
 targets_to_control = np.linalg.inv(controls_to_targets)
 # print(f"target_2_control: {targets_to_control}")
 
 # setup pid controller for targets
-Kp = (1, 1, 5, 5, 5, 5)     # x, y, z, roll, pitch, yaw
-Kd = np.dot(Kp, 0.1)
+pid_tunes = 1 * ((1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0))  # Kp, Ki, Kd
+pids = []
+for tune in pid_tunes:
+    pid = PID(tune[0], tune[1], tune[2], setpoint=0.0, sample_time=None)
+    pids.append(pid)
 
-def get_desired(trajectory_flag, t):
-    if trajectory_flag == 1:
-        desired = (0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    elif trajectory_flag == 2:
-        xd = 1 * np.exp(t / 20) * np.sin(t) + 0.2
-        yd = np.exp(t / 20) * np.cos(t) - 0.8
-        zd = 0.5 * t
-        d_xd = 1 / 20 * np.exp(t / 20) * np.sin(t) + 1 * np.exp(t / 20) * np.cos(t)
-        d_yd = 0.05 * np.exp(t / 20) * np.cos(t) - np.exp(t / 20) * np.sin(t)
-        d_zd = 0.5
-        desired = (xd, yd, zd, d_xd, d_yd, d_zd, 0, 0, 0, 0, 0, 0)
-    return desired
-# pid_tunes = 1 * ((1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0), (1, 0, 0.0))  # Kp, Ki, Kd
-# pids = []
-# for tune in pid_tunes:
-#     pid = PID(tune[0], tune[1], tune[2], setpoint=0.0, sample_time=None)
-#     pids.append(pid)
-
-# pids[0].setpoint = 1  # 将第一个PID闭环系统的desired值设为0.5
-# pids[2].setpoint = 4.5992468 / 180 * np.pi
+pids[0].setpoint = 1  # 将第一个PID闭环系统的desired值设为0.5
+pids[2].setpoint = 4.5992468 / 180 * np.pi
 
 # get time step
 time_step = controller.get_time_step()
@@ -81,15 +64,15 @@ dt = time_step * steps_per_control  # 这里为什么不直接用 control_interv
 # simulation loop
 for i in range(iterations):
     x = [] # 存储时间序列
+    y = [] # 存储一个四维的状态（y, roll, pitch, yaw）
     thrust = []
     state = []
-    desired_states = []
+    for i in range(len(pid_tunes)):
+        y.append([])
     for i in range(len(control_names)):
         thrust.append([]) # 存储发送到每个旋翼的PWM值，以便画图
     for i in range(0, 12):
         state.append([])  # 用来存储状态信息以便画图
-    for i in range(0, 12):
-        desired_states.append([])  # 用来存储状态信息以便画图
 
     #controller.reset()
     t = 0.0
@@ -108,18 +91,14 @@ for i in range(iterations):
 
         target_input = get_targets(reply)
         target_output = np.zeros(len(target_input)) # 返回一个和target_input同维度的全零数组
-
-        trajectory_flag = 2
-        desired_state = get_desired(trajectory_flag, t)
-        for i in range(0, 12):
-            desired_states[i].append(desired_state[i])
-
-        temp_x = Kp[0] * (desired_state[0] - reply[0]) + Kd[0] * (desired_state[3] - reply[3])
-        temp_y = Kp[1] * (desired_state[1] - reply[1]) + Kd[1] * (desired_state[4] - reply[4])
-        target_output[0] = Kp[2] * (desired_state[2] - reply[2]) + Kd[2] * (desired_state[5] - reply[5])
-        target_output[1] = Kp[3] * (desired_state[7] - reply[7] + temp_x) + Kd[3] * (desired_state[10] - reply[10])
-        target_output[2] = Kp[4] * (desired_state[6] - reply[6] - temp_y) + Kd[4] * (desired_state[9] - reply[9])
-        target_output[3] = Kp[5] * (desired_state[8] - reply[8]) + Kd[5] * (desired_state[11] - reply[11])
+        for i in range(len(target_input)):
+            y[i].append(target_input[i]) 
+            #if i == 2: continue # currently ignore yaw
+            # target_output[i] = pids[i](target_input[i], dt) # 通过PID控制器计算得到应该有的力和力矩
+        target_output[0] = -5 * (reply[2] - 1) - 0.5 * (reply[5] - 0)
+        target_output[1] = -5 * (reply[7] - 0) - 0.5 * (reply[10] - 0)
+        target_output[2] = -5 * (reply[6] - 0) - 0.5 * (reply[9] - 0)
+        target_output[3] = -5 * (reply[8] - 0) - 0.5 * (reply[11] - 0)
         # print(f"At time {x}, y is {y}")
 
         # new_controls = np.matmul(targets_to_control, target_output) / 1.0 # 通过mapping matrix的逆，计算每个电机的PWM输入
@@ -161,16 +140,16 @@ for i in range(iterations):
     ax1.tick_params(axis='y', labelcolor=color1) # 将 y轴刻度 的颜色设置为color1.
     ax1.set_ylim(-0.25, 1.25)
     ax1.legend()
-    ax1.set_title('Propeller PWM vs. Time')
+    ax1.set_title('Propeller RPM vs. Time')
 
     # ax2 = ax1.twinx()
 
     color2 = 'tab:brown'
     ax2.set_xlabel('time(s)')
     ax2.set_ylabel('velocity(m/s)', color=color2)
-    ax2.plot(x, state[2], label='vertical position', color=color2)
+    ax2.plot(x, y[0], label='vertical velocity', color=color2)
     ax2.tick_params(axis='y', labelcolor=color2)
-    ax2.set_ylim(-0.25, 8)
+    ax2.set_ylim(-0.25, 2.5)
     ax2.legend()
     ax2.set_title('vertical velocity vs. Time')
 
@@ -193,11 +172,11 @@ for i in range(iterations):
     color4 = 'tab:gray'
     ax3.set_xlabel('time(s)')
     ax3.set_ylabel('attitude(degrees)', color=color2)
-    ax3.plot(x, state[6], label='pitch', color=color2)
-    ax3.plot(x, state[7], label='roll', color=color3)
-    ax3.plot(x, state[8], label='yaw', color=color4)
+    ax3.plot(x, y[1], label='pitch', color=color2)
+    ax3.plot(x, y[2], label='yaw', color=color3)
+    ax3.plot(x, y[3], label='roll', color=color4)
     ax3.tick_params(axis='y', labelcolor=color2)
-    ax3.set_ylim(-3, 3)
+    ax3.set_ylim(-30, 30)
     ax3.legend()
     ax3.set_title('Attitude vs. Time')
 
@@ -216,31 +195,7 @@ for i in range(iterations):
 
     fig.tight_layout()
     fig.set_size_inches(15.0, 5.0)
-    # plt.show()
-
-
-    fig2 = plt.figure()
-    ax1 = plt.axes(projection='3d')
-    ax1.scatter3D(desired_states[0], desired_states[1], desired_states[2], s=5, c=desired_states[2])
-    ax1.plot3D(state[0], state[1], state[2], 'gray')
     plt.show()
 
-
-    def update(i):
-        label = 'timestep {0}'.format(i)
-
-        # 更新直线和x轴（用一个新的x轴的标签）。
-        # 用元组（Tuple）的形式返回在这一帧要被重新绘图的物体
-        horiAngle = (45 + 3 * i) % 360  # transition(i, 40)
-        vertAngle = (45 + 3 * i) % 360  # transition(i, 40)
-        print(label, horiAngle, vertAngle)
-        ax1.view_init(vertAngle, horiAngle)
-        filename = 'animation/' + str('%03d' % i) + '.png'
-        plt.savefig(filename, dpi=96)
-        return ax1
-
-
-    anim = FuncAnimation(fig2, update, frames=np.arange(0, 120), interval=200)
-    anim.save('animation/line.gif', dpi=120, writer='imagemagick')
 
 controller.close()
